@@ -1,0 +1,14 @@
+{
+  "name": "cli-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AG-UI CLI bridge monorepo (server + future SPA client).",
+  "workspaces": [
+    "server"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test"
+  },
+  "packageManager": "pnpm@9.0.0"
+}
