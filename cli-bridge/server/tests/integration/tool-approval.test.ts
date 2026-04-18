@@ -4,111 +4,148 @@ import { startServer, type StartedServer } from '../../src/server.js';
 import { TestWsClient } from '../harness/ws-client.js';
 import { Scenario } from '../harness/scenario.js';
 import { MockCliAdapter } from '../harness/mock-adapter.js';
+import { makeTempStateDir, cleanupStateDir } from '../harness/fs-harness.js';
 
-async function startWithScenario(scenarioPath: string): Promise<StartedServer> {
-  process.env.MOCK_CLI_SCENARIO = scenarioPath;
+async function startWith(
+  scenarioPath: string,
+  stateDir: string,
+): Promise<StartedServer> {
   return startServer({
     port: 0,
-    adapterFor: () => new MockCliAdapter(),
-    approvalTimeoutMs: 60_000,
+    stateDir,
+    adapterFor: () => new MockCliAdapter({ scenarioPath }),
   });
 }
 
 describe('tool approval flow (integration)', () => {
   let server: StartedServer;
   let client: TestWsClient;
+  let stateDir: string;
+
+  beforeEach(() => {
+    stateDir = makeTempStateDir();
+  });
 
   afterEach(async () => {
-    await client.disconnect();
-    await server.close();
-    delete process.env.MOCK_CLI_SCENARIO;
+    await client?.disconnect();
+    await server?.close();
+    cleanupStateDir(stateDir);
   });
 
-  it('emits TOOL_CALL events, resumes after approval, finishes', async () => {
-    const scenarioPath = new Scenario('sess_approval')
+  it('approved path: tool_call MESSAGE, approval update, result update, end', async () => {
+    const scenarioPath = new Scenario()
       .turn(null)
-      .text('I will read the file.')
-      .toolCall('Read', { file_path: 'src/auth.ts' }, { id: 'tc_read_1' })
-      .exit(0)
-      .turn('sess_approval')
-      .text('Done. Here is the result.')
-      .endTurn()
+      .assistantText('I will read the file. ')
+      .toolCall('Read', { file_path: 'src/auth.ts' }, {
+        toolCallId: 'tc_read_1',
+        onApprove: { result: 'file contents here' },
+      })
+      .assistantText('Done.')
+      .endTurn('end_turn')
       .exit(0)
       .writeToFile();
 
-    server = await startWithScenario(scenarioPath);
+    server = await startWith(scenarioPath, stateDir);
     const addr = server.address() as AddressInfo;
     client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await client.connect();
 
     await client.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
     const created = await client.waitFor('SESSION_CREATED');
+    await client.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
+    await client.waitFor('SESSION_ATTACHED');
 
     await client.send({
-      type: 'RUN_STARTED',
-      runId: 'run_1',
+      type: 'START_TURN',
       sessionId: created.sessionId,
-      messages: [{ role: 'user', content: 'refactor auth.ts' }],
+      prompt: 'refactor',
     });
 
-    const toolEnd = await client.waitFor('TOOL_CALL_END', 8_000);
-    const events = client.received_copy();
-    const types = events.map((e) => e.type);
-    expect(types).toContain('TOOL_CALL_START');
-    expect(types).toContain('TOOL_CALL_ARGS');
-    expect(types).toContain('TOOL_CALL_END');
-
-    const startEv = events.find(
-      (e): e is Extract<typeof e, { type: 'TOOL_CALL_START' }> => e.type === 'TOOL_CALL_START',
+    // Wait for the tool_call MESSAGE to arrive.
+    const toolCallMsg = await client.waitForMatch(
+      (e) => e.type === 'MESSAGE' && e.message.role === 'tool_call',
+      8_000,
+      'tool_call message',
     );
-    expect(startEv?.toolCallName).toBe('Read');
-    expect(startEv?.toolCallId).toBe(toolEnd.toolCallId);
+    if (toolCallMsg.type !== 'MESSAGE' || toolCallMsg.message.role !== 'tool_call') {
+      throw new Error('unreachable');
+    }
+    expect(toolCallMsg.message.name).toBe('Read');
+    expect(toolCallMsg.message.approval).toBe('pending');
 
     await client.send({
       type: 'TOOL_CALL_RESULT',
-      toolCallId: toolEnd.toolCallId,
+      sessionId: created.sessionId,
+      toolCallId: toolCallMsg.message.toolCallId,
       approved: true,
-      content: 'file contents here',
     });
 
-    const finished = await client.waitFor('RUN_FINISHED', 8_000);
-    expect(finished.stopReason).toBe('end_turn');
+    // Wait for the approval MESSAGE_UPDATE.
+    await client.waitForMatch(
+      (e) => e.type === 'MESSAGE_UPDATE' && e.update.approval === 'approved',
+      5_000,
+      'approval update',
+    );
+
+    // Wait for tool result to populate on the tool_call row.
+    await client.waitForMatch(
+      (e) =>
+        e.type === 'MESSAGE_UPDATE' &&
+        e.update.messageId === toolCallMsg.message.messageId &&
+        e.update.result !== undefined,
+      8_000,
+      'tool result',
+    );
   });
 
-  it('rejection path also proceeds to RUN_FINISHED', async () => {
-    const scenarioPath = new Scenario('sess_reject')
+  it('denied path: approval=denied, turn still completes', async () => {
+    const scenarioPath = new Scenario()
       .turn(null)
-      .toolCall('Write', { file_path: '/etc/passwd' }, { id: 'tc_write_bad' })
-      .exit(0)
-      .turn('sess_reject')
-      .text('OK, skipping that.')
-      .endTurn()
+      .toolCall('Write', { file_path: '/etc/passwd' }, {
+        toolCallId: 'tc_bad',
+        onDeny: { skipText: '(skipped Write)' },
+      })
+      .endTurn('end_turn')
       .exit(0)
       .writeToFile();
 
-    server = await startWithScenario(scenarioPath);
+    server = await startWith(scenarioPath, stateDir);
     const addr = server.address() as AddressInfo;
     client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await client.connect();
 
     await client.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
     const created = await client.waitFor('SESSION_CREATED');
+    await client.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
+    await client.waitFor('SESSION_ATTACHED');
 
     await client.send({
-      type: 'RUN_STARTED',
-      runId: 'run_reject',
+      type: 'START_TURN',
       sessionId: created.sessionId,
-      messages: [{ role: 'user', content: 'do the thing' }],
+      prompt: 'do',
     });
 
-    const toolEnd = await client.waitFor('TOOL_CALL_END', 8_000);
+    const toolCallMsg = await client.waitForMatch(
+      (e) => e.type === 'MESSAGE' && e.message.role === 'tool_call',
+      8_000,
+      'tool_call message',
+    );
+    if (toolCallMsg.type !== 'MESSAGE' || toolCallMsg.message.role !== 'tool_call') {
+      throw new Error('unreachable');
+    }
+
     await client.send({
       type: 'TOOL_CALL_RESULT',
-      toolCallId: toolEnd.toolCallId,
+      sessionId: created.sessionId,
+      toolCallId: toolCallMsg.message.toolCallId,
       approved: false,
+      reason: 'unsafe',
     });
 
-    const finished = await client.waitFor('RUN_FINISHED', 8_000);
-    expect(finished.stopReason).toBe('end_turn');
+    await client.waitForMatch(
+      (e) => e.type === 'MESSAGE_UPDATE' && e.update.approval === 'denied',
+      5_000,
+      'denial update',
+    );
   });
 });

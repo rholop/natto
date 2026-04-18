@@ -2,25 +2,36 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export interface ScenarioLine {
-  delay: number;
-  line: string;
-}
+export type ScenarioStep =
+  | { kind: 'text'; delay: number; text: string }
+  | { kind: 'session_id'; delay: number; uuid: string }
+  | {
+      kind: 'tool_call';
+      delay: number;
+      toolCallId: string;
+      name: string;
+      args: unknown;
+      onApprove?: { result: string; delay?: number };
+      onDeny?: { skipText?: string; delay?: number };
+    }
+  | { kind: 'end_turn'; delay: number; stopReason: string }
+  | { kind: 'error'; delay: number; message: string }
+  | { kind: 'raw'; delay: number; line: string }
+  | { kind: 'stderr'; delay: number; text: string };
 
 export interface ScenarioTurn {
   matchResume: string | null;
-  lines: ScenarioLine[];
+  steps: ScenarioStep[];
   exitCode: number;
   stderr?: string;
 }
 
 export interface ScenarioFile {
-  sessionId: string | null;
   turns: ScenarioTurn[];
 }
 
 class TurnBuilder {
-  readonly lines: ScenarioLine[] = [];
+  readonly steps: ScenarioStep[] = [];
   exitCode = 0;
   stderr?: string;
 
@@ -29,31 +40,55 @@ class TurnBuilder {
     readonly matchResume: string | null,
   ) {}
 
-  text(text: string, delay = 0): this {
-    this.lines.push({ delay, line: JSON.stringify({ type: 'text', text }) });
+  sessionId(uuid: string, delay = 0): this {
+    this.steps.push({ kind: 'session_id', delay, uuid });
     return this;
   }
 
-  toolCall(name: string, input: unknown, opts: { id?: string; delay?: number } = {}): this {
-    const payload: Record<string, unknown> = { type: 'tool_use', name, input };
-    if (opts.id) payload.id = opts.id;
-    this.lines.push({ delay: opts.delay ?? 0, line: JSON.stringify(payload) });
-    this.lines.push({ delay: 0, line: JSON.stringify({ type: 'result', subtype: 'tool_use', stop_reason: 'tool_use' }) });
+  assistantText(text: string, delay = 0): this {
+    this.steps.push({ kind: 'text', delay, text });
     return this;
   }
 
-  endTurn(stopReason = 'end_turn'): this {
-    this.lines.push({ delay: 0, line: JSON.stringify({ type: 'result', subtype: 'success', stop_reason: stopReason }) });
+  toolCall(
+    name: string,
+    args: unknown,
+    opts: {
+      toolCallId?: string;
+      delay?: number;
+      onApprove?: { result: string; delay?: number };
+      onDeny?: { skipText?: string; delay?: number };
+    } = {},
+  ): this {
+    this.steps.push({
+      kind: 'tool_call',
+      delay: opts.delay ?? 0,
+      toolCallId: opts.toolCallId ?? `tc-${this.steps.length}`,
+      name,
+      args,
+      onApprove: opts.onApprove,
+      onDeny: opts.onDeny,
+    });
     return this;
   }
 
-  errorLine(message: string): this {
-    this.lines.push({ delay: 0, line: JSON.stringify({ type: 'error', message }) });
+  endTurn(stopReason = 'end_turn', delay = 0): this {
+    this.steps.push({ kind: 'end_turn', delay, stopReason });
     return this;
   }
 
-  rawLine(raw: string, delay = 0): this {
-    this.lines.push({ delay, line: raw });
+  errorLine(message: string, delay = 0): this {
+    this.steps.push({ kind: 'error', delay, message });
+    return this;
+  }
+
+  rawLine(line: string, delay = 0): this {
+    this.steps.push({ kind: 'raw', delay, line });
+    return this;
+  }
+
+  stderrText(text: string, delay = 0): this {
+    this.steps.push({ kind: 'stderr', delay, text });
     return this;
   }
 
@@ -79,8 +114,6 @@ class TurnBuilder {
 export class Scenario {
   private readonly turns: TurnBuilder[] = [];
 
-  constructor(readonly initialSessionId: string | null = null) {}
-
   turn(matchResume: string | null): TurnBuilder {
     const t = new TurnBuilder(this, matchResume);
     this.turns.push(t);
@@ -89,18 +122,17 @@ export class Scenario {
 
   build(): ScenarioFile {
     return {
-      sessionId: this.initialSessionId,
       turns: this.turns.map((t) => ({
         matchResume: t.matchResume,
-        lines: t.lines,
+        steps: t.steps,
         exitCode: t.exitCode,
         stderr: t.stderr,
       })),
     };
   }
 
-  writeToFile(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'agui-scenario-'));
+  writeToFile(prefix = 'agui-scenario-'): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
     const path = join(dir, 'scenario.json');
     writeFileSync(path, JSON.stringify(this.build(), null, 2), 'utf8');
     return path;

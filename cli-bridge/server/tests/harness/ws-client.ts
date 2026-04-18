@@ -69,6 +69,27 @@ export class TestWsClient {
     });
   }
 
+  waitForMatch(
+    predicate: (e: ServerEvent) => boolean,
+    timeoutMs = 5_000,
+    label = 'predicate',
+  ): Promise<ServerEvent> {
+    const existing = this.received.find(predicate);
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.waiters.findIndex((w) => w.timer === timer);
+        if (idx !== -1) this.waiters.splice(idx, 1);
+        reject(new Error(`timed out waiting for ${label} after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.waiters.push({ predicate, resolve, reject, timer });
+    });
+  }
+
+  all(): ServerEvent[] {
+    return [...this.received];
+  }
+
   async collectUntil(type: ServerEvent['type'], timeoutMs = 5_000): Promise<ServerEvent[]> {
     await this.waitFor(type, timeoutMs);
     const endIdx = this.received.findIndex((e) => e.type === type);

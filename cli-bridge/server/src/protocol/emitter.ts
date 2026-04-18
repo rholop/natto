@@ -2,22 +2,44 @@ import type { WebSocket } from 'ws';
 import type { ServerEvent } from './events.js';
 
 export interface EventSink {
-  emit(event: ServerEvent): void;
+  send(event: ServerEvent): void;
 }
 
-export class WebSocketEmitter implements EventSink {
-  constructor(private readonly socket: WebSocket) {}
+export function socketSink(socket: WebSocket): EventSink {
+  return {
+    send(event) {
+      if (socket.readyState !== socket.OPEN) return;
+      socket.send(JSON.stringify(event));
+    },
+  };
+}
 
-  emit(event: ServerEvent): void {
-    if (this.socket.readyState !== this.socket.OPEN) return;
-    this.socket.send(JSON.stringify(event));
+export class FanoutEmitter {
+  private readonly subscribers = new Set<EventSink>();
+
+  add(sink: EventSink): void {
+    this.subscribers.add(sink);
   }
-}
 
-export class CallbackEmitter implements EventSink {
-  constructor(private readonly cb: (event: ServerEvent) => void) {}
+  remove(sink: EventSink): void {
+    this.subscribers.delete(sink);
+  }
 
-  emit(event: ServerEvent): void {
-    this.cb(event);
+  size(): number {
+    return this.subscribers.size;
+  }
+
+  clear(): void {
+    this.subscribers.clear();
+  }
+
+  broadcast(event: ServerEvent): void {
+    for (const sub of this.subscribers) {
+      try {
+        sub.send(event);
+      } catch {
+        // individual sink failures should not affect the rest
+      }
+    }
   }
 }

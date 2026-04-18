@@ -1,23 +1,34 @@
-import type { CliAdapter, SpawnOptions, ToolCallResult } from './adapter.js';
+import type { CliAdapter, SpawnParams, SpawnSpec } from './adapter.js';
 import type { CliEvent } from '../protocol/parser.js';
 
 export interface ClaudeCodeAdapterOptions {
   binary?: string;
+  hookBinPath?: string;
 }
 
 export class ClaudeCodeAdapter implements CliAdapter {
   readonly provider = 'claude-code' as const;
   private readonly binary: string;
+  private readonly hookBinPath: string | null;
 
   constructor(opts: ClaudeCodeAdapterOptions = {}) {
     this.binary = opts.binary ?? 'claude';
+    this.hookBinPath = opts.hookBinPath ?? null;
   }
 
-  buildArgv(opts: SpawnOptions): string[] {
-    const args = [this.binary, '-p', opts.prompt];
-    if (opts.sessionUuid) args.push('--resume', opts.sessionUuid);
-    args.push('--output-format', 'stream-json', '--verbose');
-    return args;
+  buildSpawn(params: SpawnParams): SpawnSpec {
+    const argv = [this.binary, '-p', params.prompt];
+    if (params.resumeUuid) argv.push('--resume', params.resumeUuid);
+    argv.push('--output-format', 'stream-json', '--verbose');
+    if (this.hookBinPath) argv.push('--permission-prompt-tool', this.hookBinPath);
+    return {
+      argv,
+      env: {
+        AGUI_HOOK_URL: params.hookUrl,
+        AGUI_HOOK_TOKEN: params.hookToken,
+        AGUI_SESSION_ID: params.sessionId,
+      },
+    };
   }
 
   parseJsonlLine(raw: string): CliEvent | null {
@@ -44,17 +55,33 @@ export class ClaudeCodeAdapter implements CliAdapter {
       return { type: 'tool_call', name, args, id };
     }
 
+    if (type === 'tool_result') {
+      const toolCallId =
+        typeof obj.tool_use_id === 'string'
+          ? obj.tool_use_id
+          : typeof obj.tool_call_id === 'string'
+            ? obj.tool_call_id
+            : '';
+      const content =
+        typeof obj.content === 'string'
+          ? obj.content
+          : obj.content === undefined
+            ? ''
+            : JSON.stringify(obj.content);
+      return { type: 'tool_result', toolCallId, content };
+    }
+
     if (type === 'system' && typeof obj.session_id === 'string') {
       return { type: 'session_id', uuid: obj.session_id };
     }
 
     if (type === 'result') {
       const stopReason =
-        typeof obj.stop_reason === 'string' ? obj.stop_reason :
-        typeof obj.subtype === 'string' ? obj.subtype :
-        'unknown';
-      // A "tool_use" stop_reason is a pause, not a real end-of-turn.
-      // The tool_call event already signalled the pause; skip this line.
+        typeof obj.stop_reason === 'string'
+          ? obj.stop_reason
+          : typeof obj.subtype === 'string'
+            ? obj.subtype
+            : 'unknown';
       if (stopReason === 'tool_use') return null;
       return { type: 'end_turn', stopReason };
     }
@@ -65,13 +92,5 @@ export class ClaudeCodeAdapter implements CliAdapter {
     }
 
     return null;
-  }
-
-  buildResumePrompt(result: ToolCallResult): string {
-    if (!result.approved) {
-      return `The user rejected the tool call "${result.toolName}" (id ${result.toolCallId}). Please try a different approach.`;
-    }
-    const content = result.content ?? '';
-    return `Tool "${result.toolName}" (id ${result.toolCallId}) returned:\n\n${content}`;
   }
 }

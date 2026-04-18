@@ -4,59 +4,79 @@ import { startServer, type StartedServer } from '../../src/server.js';
 import { TestWsClient } from '../harness/ws-client.js';
 import { Scenario } from '../harness/scenario.js';
 import { MockCliAdapter } from '../harness/mock-adapter.js';
+import { makeTempStateDir, cleanupStateDir } from '../harness/fs-harness.js';
 
 describe('streaming turn (integration)', () => {
   let server: StartedServer;
   let client: TestWsClient;
+  let stateDir: string;
 
-  beforeEach(async () => {
-    const scenarioPath = new Scenario('sess_test_stream')
+  beforeEach(() => {
+    stateDir = makeTempStateDir();
+  });
+
+  afterEach(async () => {
+    await client?.disconnect();
+    await server?.close();
+    cleanupStateDir(stateDir);
+  });
+
+  it('emits user MESSAGE, assistant MESSAGE with content deltas, then complete status', async () => {
+    const scenarioPath = new Scenario()
       .turn(null)
-      .text('hello ')
-      .text('world')
-      .endTurn()
+      .sessionId('cli-uuid-1')
+      .assistantText('hello ')
+      .assistantText('world')
+      .endTurn('end_turn')
       .exit(0)
       .writeToFile();
-    process.env.MOCK_CLI_SCENARIO = scenarioPath;
 
     server = await startServer({
       port: 0,
-      adapterFor: () => new MockCliAdapter(),
+      stateDir,
+      adapterFor: () => new MockCliAdapter({ scenarioPath }),
     });
     const addr = server.address() as AddressInfo;
     client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await client.connect();
-  });
 
-  afterEach(async () => {
-    await client.disconnect();
-    await server.close();
-    delete process.env.MOCK_CLI_SCENARIO;
-  });
-
-  it('emits TEXT_MESSAGE_START/CONTENT/END then RUN_FINISHED', async () => {
     await client.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
     const created = await client.waitFor('SESSION_CREATED');
+    await client.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
+    await client.waitFor('SESSION_ATTACHED');
 
     await client.send({
-      type: 'RUN_STARTED',
-      runId: 'run_1',
+      type: 'START_TURN',
       sessionId: created.sessionId,
-      messages: [{ role: 'user', content: 'say hi' }],
+      prompt: 'say hi',
     });
 
-    const finished = await client.waitFor('RUN_FINISHED', 8_000);
-    expect(finished.stopReason).toBe('end_turn');
+    // Wait for assistant message-complete update.
+    await client.waitForMatch(
+      (e) =>
+        e.type === 'MESSAGE_UPDATE' &&
+        e.update.status === 'complete',
+      8_000,
+      'assistant complete',
+    );
 
-    const events = client.received_copy();
-    const types = events.map((e) => e.type);
-    expect(types).toContain('TEXT_MESSAGE_START');
-    expect(types).toContain('TEXT_MESSAGE_CONTENT');
-    expect(types).toContain('TEXT_MESSAGE_END');
+    const events = client.all();
+    const userMessages = events.filter(
+      (e) => e.type === 'MESSAGE' && e.message.role === 'user',
+    );
+    expect(userMessages).toHaveLength(1);
+
+    const assistantMessage = events.find(
+      (e) => e.type === 'MESSAGE' && e.message.role === 'assistant',
+    );
+    expect(assistantMessage).toBeDefined();
 
     const deltas = events
-      .filter((e): e is Extract<typeof e, { type: 'TEXT_MESSAGE_CONTENT' }> => e.type === 'TEXT_MESSAGE_CONTENT')
-      .map((e) => e.delta)
+      .filter(
+        (e): e is Extract<typeof e, { type: 'MESSAGE_UPDATE' }> =>
+          e.type === 'MESSAGE_UPDATE' && typeof e.update.contentDelta === 'string',
+      )
+      .map((e) => e.update.contentDelta!)
       .join('');
     expect(deltas).toBe('hello world');
   });

@@ -1,16 +1,13 @@
 export type CliEvent =
   | { type: 'text_delta'; delta: string }
   | { type: 'tool_call'; name: string; args: string; id?: string }
+  | { type: 'tool_result'; toolCallId: string; content: string }
   | { type: 'session_id'; uuid: string }
   | { type: 'end_turn'; stopReason: string }
   | { type: 'error'; message: string };
 
 export type CliEventMapper = (parsed: unknown) => CliEvent | null;
 
-/**
- * Line-buffered JSONL parser. Stdout arrives in arbitrary chunks that may split
- * a line in the middle; feed() buffers partial lines and only emits whole ones.
- */
 export class JsonlLineBuffer {
   private buffer = '';
 

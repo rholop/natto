@@ -1,91 +1,119 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { Session } from '../../src/session/session.js';
-import { SessionState } from '../../src/session/types.js';
-import { CallbackEmitter } from '../../src/protocol/emitter.js';
-import type { CliAdapter, SpawnOptions, ToolCallResult } from '../../src/adapters/adapter.js';
+import type { CliAdapter, SpawnParams, SpawnSpec } from '../../src/adapters/adapter.js';
 import type { CliEvent } from '../../src/protocol/parser.js';
+import type { EventSink } from '../../src/protocol/emitter.js';
 import type { ServerEvent } from '../../src/protocol/events.js';
+import { openSessionLog, writeMeta, type SessionMeta } from '../../src/session/store.js';
+import { makeTempStateDir, cleanupStateDir } from '../harness/fs-harness.js';
 
-class BrokenArgvAdapter implements CliAdapter {
+class EmptyArgvAdapter implements CliAdapter {
   readonly provider = 'claude-code' as const;
-  buildArgv(_opts: SpawnOptions): string[] {
-    return [];
+  buildSpawn(_p: SpawnParams): SpawnSpec {
+    return { argv: [], env: {} };
   }
   parseJsonlLine(_raw: string): CliEvent | null {
     return null;
   }
-  buildResumePrompt(_r: ToolCallResult): string {
-    return '';
-  }
 }
 
-describe('Session state machine (unit)', () => {
-  const makeSession = (
-    adapter: CliAdapter = new BrokenArgvAdapter(),
-    sink: (e: ServerEvent) => void = () => {},
-  ) =>
-    new Session({
-      sessionId: 'sess_unit',
-      provider: adapter.provider,
-      cwd: process.cwd(),
-      adapter,
-      emitter: new CallbackEmitter(sink),
-      approvalTimeoutMs: 1_000,
-    });
+function makeSessionOnDisk(
+  stateDir: string,
+  adapter: CliAdapter,
+  sink?: EventSink,
+): Session {
+  const now = Date.now();
+  const meta: SessionMeta = {
+    sessionId: 'sess-unit',
+    provider: adapter.provider,
+    cwd: process.cwd(),
+    cliSessionUuid: null,
+    state: 'Idle',
+    lastSeq: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
+  writeMeta(stateDir, meta);
+  const log = openSessionLog(stateDir, meta.sessionId);
+  const session = new Session({
+    meta,
+    stateDir,
+    adapter,
+    log,
+    historyPageSize: 10,
+    toolOutputPreviewBytes: 1024,
+    hookBaseUrl: 'http://127.0.0.1:0',
+    hookToken: 'test-token',
+  });
+  if (sink) session.attach(sink);
+  return session;
+}
+
+describe('Session (unit)', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = makeTempStateDir();
+  });
+  afterEach(() => {
+    cleanupStateDir(dir);
+  });
 
   it('starts in Idle', () => {
-    const s = makeSession();
-    expect(s.getState()).toBe(SessionState.Idle);
+    const s = makeSessionOnDisk(dir, new EmptyArgvAdapter());
+    expect(s.getState()).toBe('Idle');
   });
 
-  it('emits CLI_ERROR and stays Idle when adapter returns empty argv', () => {
+  it('emits user MESSAGE and transitions to Idle when adapter returns empty argv', () => {
     const events: ServerEvent[] = [];
-    const s = makeSession(new BrokenArgvAdapter(), (e) => events.push(e));
-    s.startTurn('run_1', 'hi');
-    // Synchronous error before any child is spawned.
-    expect(s.getState()).toBe(SessionState.Idle);
-    const err = events.find((e) => e.type === 'CLI_ERROR');
-    expect(err).toBeDefined();
-    expect(err?.type === 'CLI_ERROR' && err.reason).toBe('adapter_error');
+    const sink: EventSink = { send: (e) => events.push(e) };
+    const s = makeSessionOnDisk(dir, new EmptyArgvAdapter(), sink);
+    s.startTurn('hello');
+    expect(s.getState()).toBe('Idle');
+    const userMsg = events.find(
+      (e) => e.type === 'MESSAGE' && e.message.role === 'user',
+    );
+    expect(userMsg).toBeDefined();
+    const errEvent = events.find((e) => e.type === 'CLI_ERROR');
+    expect(errEvent).toBeDefined();
+    expect(errEvent?.type === 'CLI_ERROR' && errEvent.reason).toBe('adapter_error');
   });
 
-  it('submitToolResult is a no-op when not in AwaitingApproval', () => {
+  it('submitToolResult is a no-op when not AwaitingApproval', () => {
     const events: ServerEvent[] = [];
-    const s = makeSession(new BrokenArgvAdapter(), (e) => events.push(e));
-    s.submitToolResult('tc_unknown', true, 'result');
-    expect(events).toHaveLength(0);
-    expect(s.getState()).toBe(SessionState.Idle);
+    const sink: EventSink = { send: (e) => events.push(e) };
+    const s = makeSessionOnDisk(dir, new EmptyArgvAdapter(), sink);
+    const before = events.length;
+    s.submitToolResult({ toolCallId: 'nope', approved: true });
+    expect(events.length).toBe(before);
+    expect(s.getState()).toBe('Idle');
   });
 
-  it('abort on an Idle session is a no-op', () => {
-    const s = makeSession();
-    s.abort('test');
-    expect(s.getState()).toBe(SessionState.Idle);
-  });
-
-  it('startTurn on a busy session emits session_busy CLI_ERROR', () => {
+  it('startTurn while not Idle emits session_busy', () => {
     const events: ServerEvent[] = [];
-    // Adapter that spawns `node -e 'setInterval(()=>{},1000)'` (stays alive).
-    class HangAdapter implements CliAdapter {
-      readonly provider = 'claude-code' as const;
-      buildArgv(_o: SpawnOptions): string[] {
-        return ['node', '-e', 'setInterval(()=>{}, 1000)'];
-      }
-      parseJsonlLine(_r: string): CliEvent | null {
-        return null;
-      }
-      buildResumePrompt(_r: ToolCallResult): string {
-        return '';
-      }
-    }
-    const s = makeSession(new HangAdapter(), (e) => events.push(e));
-    s.startTurn('run_1', 'hi');
-    // State should be Streaming shortly after spawn.
-    s.startTurn('run_2', 'again');
+    const sink: EventSink = { send: (e) => events.push(e) };
+    const s = makeSessionOnDisk(dir, new EmptyArgvAdapter(), sink);
+    // Force state to simulate a busy session
+    (s as unknown as { meta: SessionMeta }).meta = {
+      ...(s as unknown as { meta: SessionMeta }).meta,
+      state: 'Streaming',
+    };
+    s.startTurn('second prompt');
     const busy = events.find(
-      (e) => e.type === 'CLI_ERROR' && (e as Extract<ServerEvent, { type: 'CLI_ERROR' }>).reason === 'session_busy',
+      (e) => e.type === 'CLI_ERROR' && e.reason === 'session_busy',
     );
     expect(busy).toBeDefined();
-    s.abort('cleanup');
+  });
+
+  it('seq values are monotonic across emits', () => {
+    const events: ServerEvent[] = [];
+    const sink: EventSink = { send: (e) => events.push(e) };
+    const s = makeSessionOnDisk(dir, new EmptyArgvAdapter(), sink);
+    s.startTurn('a');
+    const seqs = events
+      .filter((e) => e.type === 'MESSAGE' || e.type === 'MESSAGE_UPDATE')
+      .map((e) => e.seq);
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i]!).toBeGreaterThan(seqs[i - 1]!);
+    }
   });
 });

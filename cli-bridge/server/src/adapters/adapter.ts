@@ -1,23 +1,22 @@
 import type { Provider } from '../protocol/events.js';
 import type { CliEvent } from '../protocol/parser.js';
 
-export interface SpawnOptions {
-  sessionUuid: string | null;
+export interface SpawnParams {
   prompt: string;
   cwd: string;
-  env?: Record<string, string>;
+  resumeUuid: string | null;
+  hookUrl: string;
+  hookToken: string;
+  sessionId: string;
 }
 
-export interface ToolCallResult {
-  toolCallId: string;
-  toolName: string;
-  approved: boolean;
-  content?: string;
+export interface SpawnSpec {
+  argv: string[];
+  env: Record<string, string>;
 }
 
 export interface CliAdapter {
   readonly provider: Provider;
-  buildArgv(opts: SpawnOptions): string[];
+  buildSpawn(params: SpawnParams): SpawnSpec;
   parseJsonlLine(raw: string): CliEvent | null;
-  buildResumePrompt(toolResult: ToolCallResult): string;
 }

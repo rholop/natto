@@ -1,35 +1,43 @@
-import type { CliAdapter, SpawnOptions, ToolCallResult } from './adapter.js';
+import type { CliAdapter, SpawnParams, SpawnSpec } from './adapter.js';
 import type { CliEvent } from '../protocol/parser.js';
 
 export interface GeminiAdapterOptions {
   binary?: string;
+  hookBinPath?: string;
 }
 
 /**
- * Best-effort Gemini CLI adapter. Two items are open (see docs/bridge-server-design.md §11):
- *   - TODO(gemini-resume): confirm the flag equivalent to Claude's --resume <uuid>.
- *   - TODO(gemini-schema): confirm the exact JSONL shape emitted by --output-format stream-json.
- * Until those are verified against a real Gemini CLI build, the mapping below
- * mirrors a generic stream-json shape and is fully exercised via the mock CLI.
+ * Best-effort Gemini CLI adapter. Three items remain open:
+ *   TODO(gemini-resume): confirm the flag equivalent to Claude's --resume <uuid>.
+ *   TODO(gemini-schema): confirm the exact JSONL shape emitted by stream-json.
+ *   TODO(gemini-hook): confirm how Gemini's permission-prompt-tool equivalent is wired.
  */
 export class GeminiAdapter implements CliAdapter {
   readonly provider = 'gemini' as const;
   private readonly binary: string;
+  private readonly hookBinPath: string | null;
 
   constructor(opts: GeminiAdapterOptions = {}) {
     this.binary = opts.binary ?? 'gemini';
+    this.hookBinPath = opts.hookBinPath ?? null;
   }
 
-  buildArgv(opts: SpawnOptions): string[] {
-    const args = [this.binary, '-p', opts.prompt];
-    // TODO(gemini-resume): replace with the actual resume flag once confirmed.
-    if (opts.sessionUuid) args.push('--session', opts.sessionUuid);
-    args.push('--output-format', 'stream-json');
-    return args;
+  buildSpawn(params: SpawnParams): SpawnSpec {
+    const argv = [this.binary, '-p', params.prompt];
+    if (params.resumeUuid) argv.push('--session', params.resumeUuid);
+    argv.push('--output-format', 'stream-json');
+    if (this.hookBinPath) argv.push('--permission-prompt-tool', this.hookBinPath);
+    return {
+      argv,
+      env: {
+        AGUI_HOOK_URL: params.hookUrl,
+        AGUI_HOOK_TOKEN: params.hookToken,
+        AGUI_SESSION_ID: params.sessionId,
+      },
+    };
   }
 
   parseJsonlLine(raw: string): CliEvent | null {
-    // TODO(gemini-schema): adjust field names once the real schema is confirmed.
     let obj: Record<string, unknown>;
     try {
       const parsed = JSON.parse(raw);
@@ -47,9 +55,30 @@ export class GeminiAdapter implements CliAdapter {
 
     if (type === 'tool_call' || type === 'function_call') {
       const name = typeof obj.name === 'string' ? obj.name : '';
-      const args = obj.args === undefined ? (obj.arguments === undefined ? '' : JSON.stringify(obj.arguments)) : JSON.stringify(obj.args);
+      const args =
+        obj.args === undefined
+          ? obj.arguments === undefined
+            ? ''
+            : JSON.stringify(obj.arguments)
+          : JSON.stringify(obj.args);
       const id = typeof obj.id === 'string' ? obj.id : undefined;
       return { type: 'tool_call', name, args, id };
+    }
+
+    if (type === 'tool_result' || type === 'function_result') {
+      const toolCallId =
+        typeof obj.tool_call_id === 'string'
+          ? obj.tool_call_id
+          : typeof obj.id === 'string'
+            ? obj.id
+            : '';
+      const content =
+        typeof obj.content === 'string'
+          ? obj.content
+          : obj.content === undefined
+            ? ''
+            : JSON.stringify(obj.content);
+      return { type: 'tool_result', toolCallId, content };
     }
 
     if (type === 'session' && typeof obj.session_id === 'string') {
@@ -67,12 +96,5 @@ export class GeminiAdapter implements CliAdapter {
     }
 
     return null;
-  }
-
-  buildResumePrompt(result: ToolCallResult): string {
-    if (!result.approved) {
-      return `The user rejected tool "${result.toolName}" (id ${result.toolCallId}). Please try a different approach.`;
-    }
-    return `Tool "${result.toolName}" (id ${result.toolCallId}) result:\n\n${result.content ?? ''}`;
   }
 }
