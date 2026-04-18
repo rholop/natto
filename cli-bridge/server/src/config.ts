@@ -1,44 +1,48 @@
 import { resolve } from 'node:path';
+import { PROVIDERS, type Provider } from './protocol/events.js';
 
 export interface ServerConfig {
   port: number;
   host: string;
-  maxSessions: number;
+  provider: Provider;
+  cwd: string;
   stateDir: string;
-  orphanTtlMs: number;
   historyPageSize: number;
   toolOutputPreviewBytes: number;
   claudeBinary: string;
   geminiBinary: string;
+  resumeUuid: string | null;
 }
 
 export const DEFAULT_CONFIG: ServerConfig = {
   port: 7878,
   host: '127.0.0.1',
-  maxSessions: 10,
+  provider: 'claude-code',
+  cwd: process.cwd(),
   stateDir: '.natto',
-  orphanTtlMs: 86_400_000,
   historyPageSize: 50,
   toolOutputPreviewBytes: 4096,
   claudeBinary: 'claude',
   geminiBinary: 'gemini',
+  resumeUuid: null,
 };
 
 export function resolveStateDir(dir: string, cwd: string = process.cwd()): string {
   return resolve(cwd, dir);
 }
 
+function parseProvider(raw: string | undefined, fallback: Provider): Provider {
+  if (!raw) return fallback;
+  return (PROVIDERS as readonly string[]).includes(raw) ? (raw as Provider) : fallback;
+}
+
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   return {
     port: env.AGUI_BRIDGE_PORT ? Number(env.AGUI_BRIDGE_PORT) : DEFAULT_CONFIG.port,
     host: env.AGUI_BRIDGE_HOST ?? DEFAULT_CONFIG.host,
-    maxSessions: env.AGUI_BRIDGE_MAX_SESSIONS
-      ? Number(env.AGUI_BRIDGE_MAX_SESSIONS)
-      : DEFAULT_CONFIG.maxSessions,
+    provider: parseProvider(env.AGUI_BRIDGE_PROVIDER, DEFAULT_CONFIG.provider),
+    cwd: env.AGUI_BRIDGE_CWD ?? DEFAULT_CONFIG.cwd,
     stateDir: env.AGUI_BRIDGE_STATE_DIR ?? DEFAULT_CONFIG.stateDir,
-    orphanTtlMs: env.AGUI_BRIDGE_ORPHAN_TTL_MS
-      ? Number(env.AGUI_BRIDGE_ORPHAN_TTL_MS)
-      : DEFAULT_CONFIG.orphanTtlMs,
     historyPageSize: env.AGUI_BRIDGE_HISTORY_PAGE_SIZE
       ? Number(env.AGUI_BRIDGE_HISTORY_PAGE_SIZE)
       : DEFAULT_CONFIG.historyPageSize,
@@ -47,6 +51,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): ServerConfi
       : DEFAULT_CONFIG.toolOutputPreviewBytes,
     claudeBinary: env.AGUI_BRIDGE_CLAUDE_BINARY ?? DEFAULT_CONFIG.claudeBinary,
     geminiBinary: env.AGUI_BRIDGE_GEMINI_BINARY ?? DEFAULT_CONFIG.geminiBinary,
+    resumeUuid: env.AGUI_BRIDGE_RESUME_UUID ?? DEFAULT_CONFIG.resumeUuid,
   };
 }
 
@@ -61,14 +66,21 @@ export function parseCliFlags(argv: string[]): Partial<ServerConfig> {
       case '--host':
         out.host = argv[++i] ?? DEFAULT_CONFIG.host;
         break;
+      case '--provider': {
+        const raw = argv[++i];
+        if (raw && (PROVIDERS as readonly string[]).includes(raw)) {
+          out.provider = raw as Provider;
+        }
+        break;
+      }
+      case '--cwd':
+        out.cwd = argv[++i] ?? DEFAULT_CONFIG.cwd;
+        break;
       case '--state-dir':
         out.stateDir = argv[++i] ?? DEFAULT_CONFIG.stateDir;
         break;
-      case '--max-sessions':
-        out.maxSessions = Number(argv[++i]);
-        break;
-      case '--orphan-ttl-ms':
-        out.orphanTtlMs = Number(argv[++i]);
+      case '--resume-uuid':
+        out.resumeUuid = argv[++i] ?? null;
         break;
     }
   }

@@ -7,7 +7,6 @@ export interface SpawnParams {
   resumeUuid: string | null;
   hookUrl: string;
   hookToken: string;
-  sessionId: string;
 }
 
 export interface SpawnSpec {

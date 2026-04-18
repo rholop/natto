@@ -10,7 +10,7 @@ import type {
   Message,
   MessageUpdate,
   Provider,
-  SessionSnapshotEvent,
+  SnapshotEvent,
   SessionState,
   ToolCallMessage,
   ToolResultSummary,
@@ -19,7 +19,6 @@ import type {
 import { JsonlLineBuffer, type CliEvent } from '../protocol/parser.js';
 import { applyPatch } from '../protocol/reducer.js';
 import {
-  openSessionLog,
   readToolResultSidecar,
   writeMeta,
   writeToolResultSidecar,
@@ -63,7 +62,6 @@ interface ActiveTurn {
 }
 
 export class Session {
-  readonly sessionId: string;
   readonly provider: Provider;
   readonly cwd: string;
 
@@ -73,7 +71,7 @@ export class Session {
   private readonly log: SessionLog;
   private readonly historyPageSize: number;
   private readonly toolOutputPreviewBytes: number;
-  private readonly hookBaseUrl: string;
+  private hookBaseUrl: string;
   private readonly hookToken: string;
   private readonly logger: Logger;
 
@@ -87,7 +85,6 @@ export class Session {
 
   constructor(opts: SessionOptions) {
     this.meta = opts.meta;
-    this.sessionId = opts.meta.sessionId;
     this.provider = opts.meta.provider;
     this.cwd = opts.meta.cwd;
     this.stateDir = opts.stateDir;
@@ -124,16 +121,15 @@ export class Session {
     return this.fanout.size();
   }
 
-  attach(sink: EventSink): SessionSnapshotEvent {
+  attach(sink: EventSink): SnapshotEvent {
     this.fanout.add(sink);
     this.lastActivityAt = Date.now();
     const { entries, hasMore } = this.log.tail(this.historyPageSize);
     const inFlight = this.currentInFlightMessage();
     const pending = this.pendingToolCallSummary();
     return {
-      type: 'SESSION_SNAPSHOT',
+      type: 'SNAPSHOT',
       seq: this.meta.lastSeq,
-      sessionId: this.sessionId,
       state: this.meta.state,
       lastSeq: this.meta.lastSeq,
       recent: entries,
@@ -154,11 +150,15 @@ export class Session {
   }
 
   async fetchToolResult(toolCallId: string): Promise<string | null> {
-    return readToolResultSidecar(this.stateDir, this.sessionId, toolCallId);
+    return readToolResultSidecar(this.stateDir, toolCallId);
   }
 
-  get hookToken_readonly(): string {
+  getHookToken(): string {
     return this.hookToken;
+  }
+
+  setHookBaseUrl(url: string): void {
+    this.hookBaseUrl = url;
   }
 
   startTurn(prompt: string): void {
@@ -214,7 +214,7 @@ export class Session {
     this.closeInFlight('interrupted');
     this.turn = null;
     if (this.meta.state !== 'Idle') {
-      this.logger(`session ${this.sessionId} aborted: ${reason}`);
+      this.logger(`session aborted: ${reason}`);
       this.transition('Idle');
     }
   }
@@ -260,7 +260,6 @@ export class Session {
       resumeUuid: this.meta.cliSessionUuid,
       hookUrl: `${this.hookBaseUrl}/hook/permission-prompt`,
       hookToken: this.hookToken,
-      sessionId: this.sessionId,
     });
     const [bin, ...args] = argv;
     if (!bin) {
@@ -346,9 +345,6 @@ export class Session {
       }
 
       case 'tool_call':
-        // For adapters that report tool calls on the JSONL stream (rather than
-        // solely via the permission-prompt hook), treat the line as informational —
-        // the hook is the source of truth for pending approvals.
         this.logger(`tool_call line seen on stdout (via adapter parse): ${event.name}`);
         break;
 
@@ -423,12 +419,7 @@ export class Session {
       return { preview: content, totalBytes, truncated: false };
     }
     const preview = content.slice(0, limit);
-    const sidecarPath = writeToolResultSidecar(
-      this.stateDir,
-      this.sessionId,
-      toolCallId,
-      content,
-    );
+    const sidecarPath = writeToolResultSidecar(this.stateDir, toolCallId, content);
     return { preview, totalBytes, truncated: true, sidecarPath };
   }
 
@@ -436,7 +427,7 @@ export class Session {
     this.messages.push(message);
     this.messagesById.set(message.messageId, message);
     const seq = this.nextSeq();
-    const event = { type: 'MESSAGE' as const, seq, sessionId: this.sessionId, message };
+    const event = { type: 'MESSAGE' as const, seq, message };
     this.log.append(event);
     this.persistMeta();
     this.fanout.broadcast(event);
@@ -452,7 +443,7 @@ export class Session {
       if (idx >= 0) this.messages[idx] = next;
     }
     const seq = this.nextSeq();
-    const event = { type: 'MESSAGE_UPDATE' as const, seq, sessionId: this.sessionId, update };
+    const event = { type: 'MESSAGE_UPDATE' as const, seq, update };
     this.log.append(event);
     this.persistMeta();
     this.fanout.broadcast(event);
@@ -467,7 +458,6 @@ export class Session {
     const event: CliErrorEvent = {
       type: 'CLI_ERROR',
       seq: this.meta.lastSeq,
-      sessionId: this.sessionId,
       reason,
       message,
       ...extras,
@@ -483,7 +473,7 @@ export class Session {
 
   private transition(next: SessionState): void {
     if (this.meta.state === next) return;
-    this.logger(`session ${this.sessionId}: ${this.meta.state} → ${next}`);
+    this.logger(`session: ${this.meta.state} → ${next}`);
     this.meta = { ...this.meta, state: next, updatedAt: Date.now() };
     this.persistMeta();
   }

@@ -2,6 +2,7 @@
 import { startServer } from './server.js';
 import { configFromEnv, parseCliFlags, resolveStateDir } from './config.js';
 import { LockHeldError } from './session/store.js';
+import { ProviderMismatchError } from './session/holder.js';
 
 async function main(): Promise<void> {
   const fromEnv = configFromEnv();
@@ -18,12 +19,16 @@ async function main(): Promise<void> {
       console.error('[agui-bridge] another bridge is using this state directory.');
       process.exit(2);
     }
+    if (err instanceof ProviderMismatchError) {
+      console.error(`[agui-bridge] cannot start: ${err.message}`);
+      process.exit(3);
+    }
     throw err;
   }
 
   const addr = server.address();
   console.log(
-    `[agui-bridge] listening on ws://${addr.address}:${addr.port} (state: ${resolveStateDir(config.stateDir)})`,
+    `[agui-bridge] listening on ws://${addr.address}:${addr.port} (provider: ${config.provider}, state: ${resolveStateDir(config.stateDir)})`,
   );
 
   let shuttingDown = false;

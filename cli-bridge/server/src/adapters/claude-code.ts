@@ -26,7 +26,6 @@ export class ClaudeCodeAdapter implements CliAdapter {
       env: {
         AGUI_HOOK_URL: params.hookUrl,
         AGUI_HOOK_TOKEN: params.hookToken,
-        AGUI_SESSION_ID: params.sessionId,
       },
     };
   }

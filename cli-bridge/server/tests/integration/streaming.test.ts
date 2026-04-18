@@ -39,19 +39,10 @@ describe('streaming turn (integration)', () => {
     const addr = server.address() as AddressInfo;
     client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await client.connect();
+    await client.waitFor('SNAPSHOT');
 
-    await client.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
-    const created = await client.waitFor('SESSION_CREATED');
-    await client.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await client.waitFor('SESSION_ATTACHED');
+    await client.send({ type: 'START_TURN', prompt: 'say hi' });
 
-    await client.send({
-      type: 'START_TURN',
-      sessionId: created.sessionId,
-      prompt: 'say hi',
-    });
-
-    // Wait for assistant message-complete update.
     await client.waitForMatch(
       (e) =>
         e.type === 'MESSAGE_UPDATE' &&

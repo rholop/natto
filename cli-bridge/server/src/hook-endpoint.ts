@@ -1,16 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { SessionRegistry } from './session/registry.js';
+import type { SessionHolder } from './session/holder.js';
 
 interface HookPayload {
-  token: string;
-  sessionId: string;
-  toolCallId: string;
-  name: string;
-  args: string;
+  token?: string;
+  toolCallId?: string;
+  name?: string;
+  args?: string;
 }
 
 export interface HookEndpointOptions {
-  registry: SessionRegistry;
+  holder: SessionHolder;
   logger?: (msg: string) => void;
 }
 
@@ -60,13 +59,9 @@ export class HookEndpoint {
         respondJson(res, 401, { allow: false, reason: 'missing_token' });
         return;
       }
-      const session = this.opts.registry.resolveHookToken(token);
+      const session = this.opts.holder.resolveHookToken(token);
       if (!session) {
         respondJson(res, 401, { allow: false, reason: 'invalid_token' });
-        return;
-      }
-      if (payload.sessionId && payload.sessionId !== session.sessionId) {
-        respondJson(res, 403, { allow: false, reason: 'session_mismatch' });
         return;
       }
 

@@ -24,10 +24,9 @@ describe('session/store', () => {
     cleanupStateDir(dir);
   });
 
-  function meta(id: string): SessionMeta {
+  function meta(): SessionMeta {
     const now = Date.now();
     return {
-      sessionId: id,
       provider: 'claude-code',
       cwd: '/',
       cliSessionUuid: null,
@@ -39,19 +38,18 @@ describe('session/store', () => {
   }
 
   it('writeMeta + readMeta round-trip', () => {
-    const m = meta('s1');
+    const m = meta();
     writeMeta(dir, m);
-    const read = readMeta(dir, 's1');
+    const read = readMeta(dir);
     expect(read).toEqual(m);
   });
 
   it('openSessionLog append + readAll + tail + readBefore', () => {
-    const log = openSessionLog(dir, 's2');
+    const log = openSessionLog(dir);
     for (let i = 1; i <= 5; i++) {
       log.append({
         type: 'MESSAGE',
         seq: i,
-        sessionId: 's2',
         message: {
           messageId: `m${i}`,
           role: 'user',
@@ -63,7 +61,7 @@ describe('session/store', () => {
     }
     log.close();
 
-    const reopened = openSessionLog(dir, 's2');
+    const reopened = openSessionLog(dir);
     expect(reopened.readAll()).toHaveLength(5);
     const tail = reopened.tail(2);
     expect(tail.entries).toHaveLength(2);
@@ -77,11 +75,11 @@ describe('session/store', () => {
   });
 
   it('writeToolResultSidecar + readToolResultSidecar round-trip', async () => {
-    writeMeta(dir, meta('s3'));
-    writeToolResultSidecar(dir, 's3', 'tc-1', 'hello world');
-    const got = await readToolResultSidecar(dir, 's3', 'tc-1');
+    writeMeta(dir, meta());
+    writeToolResultSidecar(dir, 'tc-1', 'hello world');
+    const got = await readToolResultSidecar(dir, 'tc-1');
     expect(got).toBe('hello world');
-    const missing = await readToolResultSidecar(dir, 's3', 'missing');
+    const missing = await readToolResultSidecar(dir, 'missing');
     expect(missing).toBeNull();
   });
 
@@ -96,7 +94,6 @@ describe('session/store', () => {
   it('acquireLock replaces a stale pidfile (non-existent pid)', () => {
     const stalePath = join(dir, 'bridge.lock');
     ensureStateDir(dir);
-    // use an impossible high pid to simulate a stale holder
     writeFileSync(stalePath, '999999999', 'utf8');
     const handle = acquireLock(dir);
     expect(readFileSync(stalePath, 'utf8').trim()).toBe(String(process.pid));

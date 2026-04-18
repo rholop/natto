@@ -11,8 +11,7 @@ import {
   type Provider,
   type ServerEvent,
 } from './protocol/events.js';
-import { SessionRegistry } from './session/registry.js';
-import type { Session } from './session/session.js';
+import { SessionHolder } from './session/holder.js';
 import { acquireLock, type LockHandle } from './session/store.js';
 import { DEFAULT_CONFIG, resolveStateDir, type ServerConfig } from './config.js';
 import { HookEndpoint } from './hook-endpoint.js';
@@ -20,13 +19,12 @@ import { HookEndpoint } from './hook-endpoint.js';
 export interface StartServerOptions extends Partial<ServerConfig> {
   adapterFor?: (provider: Provider) => CliAdapter;
   logger?: (msg: string) => void;
-  sweepIntervalMs?: number;
 }
 
 export interface StartedServer {
   address: () => AddressInfo;
   close: () => Promise<void>;
-  registry: SessionRegistry;
+  holder: SessionHolder;
   stateDir: string;
 }
 
@@ -47,23 +45,28 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   const http: HttpServer = createServer();
   const wss = new WebSocketServer({ noServer: true });
 
-  // hookBaseUrl is filled in after listen() so adapters can reach loopback.
   let hookBaseUrl = `http://${config.host}:${config.port}`;
 
-  const registry = new SessionRegistry({
+  const holder = new SessionHolder({
     stateDir,
-    maxSessions: config.maxSessions,
+    provider: config.provider,
+    cwd: config.cwd,
     historyPageSize: config.historyPageSize,
     toolOutputPreviewBytes: config.toolOutputPreviewBytes,
-    orphanTtlMs: config.orphanTtlMs,
     hookBaseUrl,
     adapterFor,
     logger,
+    resumeUuid: config.resumeUuid,
   });
 
-  registry.hydrateFromDisk();
+  try {
+    holder.load();
+  } catch (err) {
+    lock.release();
+    throw err;
+  }
 
-  const hookEndpoint = new HookEndpoint({ registry, logger });
+  const hookEndpoint = new HookEndpoint({ holder, logger });
 
   http.on('request', (req: IncomingMessage, res: ServerResponse) => {
     if (hookEndpoint.isHookPath(req.url)) {
@@ -82,28 +85,26 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
 
   wss.on('connection', (socket: WebSocket) => {
     const sink: EventSink = socketSink(socket);
-    const attached = new Set<string>();
+    const session = holder.get();
+    const snapshot = session.attach(sink);
+    sink.send(snapshot);
 
     socket.on('message', (raw) => {
       const text = typeof raw === 'string' ? raw : raw.toString('utf8');
       const parsed = parseClientEvent(text);
       if (!parsed.ok) {
-        sendErr(sink, '', 'invalid_message', parsed.error);
+        sendErr(sink, 'invalid_message', parsed.error);
         return;
       }
       try {
-        handleClientEvent(parsed.event, sink, attached, registry, logger);
+        handleClientEvent(parsed.event, sink, holder, logger);
       } catch (err) {
-        sendErr(sink, '', 'handler_error', (err as Error).message);
+        sendErr(sink, 'handler_error', (err as Error).message);
       }
     });
 
     socket.on('close', () => {
-      for (const id of attached) {
-        const s = registry.get(id);
-        if (s) s.detach(sink);
-      }
-      attached.clear();
+      session.detach(sink);
     });
   });
 
@@ -115,28 +116,16 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     });
   });
 
-  // Now that the server is bound, refresh hookBaseUrl with the actual port (handles port:0).
   const addr = http.address() as AddressInfo;
   hookBaseUrl = `http://${addr.address === '::' ? '127.0.0.1' : addr.address}:${addr.port}`;
-  registry.setHookBaseUrl(hookBaseUrl);
-
-  const sweepInterval = options.sweepIntervalMs ?? 60_000;
-  const sweepTimer = setInterval(() => {
-    try {
-      registry.sweepOrphans();
-    } catch (err) {
-      logger(`orphan sweep error: ${(err as Error).message}`);
-    }
-  }, sweepInterval);
-  sweepTimer.unref();
+  holder.setHookBaseUrl(hookBaseUrl);
 
   let closed = false;
   const close = async (): Promise<void> => {
     if (closed) return;
     closed = true;
-    clearInterval(sweepTimer);
     hookEndpoint.shutdown('bridge_shutdown');
-    await registry.shutdown();
+    await holder.shutdown();
     for (const ws of wss.clients) {
       try {
         ws.close();
@@ -154,7 +143,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   return {
     address: () => http.address() as AddressInfo,
     close,
-    registry,
+    holder,
     stateDir,
   };
 }
@@ -162,112 +151,28 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
 function handleClientEvent(
   event: ClientEvent,
   sink: EventSink,
-  attached: Set<string>,
-  registry: SessionRegistry,
+  holder: SessionHolder,
   logger: (msg: string) => void,
 ): void {
+  const session = holder.get();
   switch (event.type) {
-    case 'CREATE_SESSION': {
-      let session: Session;
-      try {
-        session = registry.create({ provider: event.provider, cwd: event.cwd });
-      } catch (err) {
-        sendErr(sink, '', 'create_failed', (err as Error).message);
-        return;
-      }
-      sink.send({
-        type: 'SESSION_CREATED',
-        seq: session.getMeta().lastSeq,
-        sessionId: session.sessionId,
-        provider: session.provider,
-        cwd: session.cwd,
-      });
-      return;
-    }
-
-    case 'LIST_SESSIONS': {
-      sink.send({
-        type: 'SESSION_LIST',
-        seq: 0,
-        sessionId: '',
-        sessions: registry.list(),
-      });
-      return;
-    }
-
-    case 'ATTACH_SESSION': {
-      const session = registry.get(event.sessionId);
-      if (!session) {
-        sendErr(sink, event.sessionId, 'unknown_session', 'session not found');
-        return;
-      }
-      const snapshot = session.attach(sink);
-      attached.add(event.sessionId);
-      sink.send(snapshot);
-      sink.send({
-        type: 'SESSION_ATTACHED',
-        seq: snapshot.lastSeq,
-        sessionId: session.sessionId,
-        lastSeq: snapshot.lastSeq,
-      });
-      return;
-    }
-
-    case 'DETACH_SESSION': {
-      const session = registry.get(event.sessionId);
-      if (session) session.detach(sink);
-      attached.delete(event.sessionId);
-      return;
-    }
-
-    case 'REMOVE_SESSION': {
-      const removed = registry.remove(event.sessionId);
-      attached.delete(event.sessionId);
-      if (removed) {
-        sink.send({
-          type: 'SESSION_REMOVED',
-          seq: 0,
-          sessionId: event.sessionId,
-        });
-      }
-      return;
-    }
-
-    case 'START_TURN': {
-      const session = registry.get(event.sessionId);
-      if (!session) {
-        sendErr(sink, event.sessionId, 'unknown_session', 'session not found');
-        return;
-      }
+    case 'START_TURN':
       session.startTurn(event.prompt);
       return;
-    }
 
-    case 'TOOL_CALL_RESULT': {
-      const session = registry.get(event.sessionId);
-      if (!session) {
-        sendErr(sink, event.sessionId, 'unknown_session', 'session not found');
-        return;
-      }
+    case 'TOOL_CALL_RESULT':
       session.submitToolResult({
         toolCallId: event.toolCallId,
         approved: event.approved,
         reason: event.reason,
       });
       return;
-    }
 
     case 'FETCH_HISTORY': {
-      const session = registry.get(event.sessionId);
-      if (!session) {
-        sendErr(sink, event.sessionId, 'unknown_session', 'session not found');
-        return;
-      }
       const { entries, hasMore } = session.fetchHistory(event.beforeSeq, event.limit);
       sink.send({
         type: 'HISTORY_PAGE',
         seq: 0,
-        sessionId: session.sessionId,
         requestId: event.requestId,
         entries,
         hasMore,
@@ -275,34 +180,21 @@ function handleClientEvent(
       return;
     }
 
-    case 'TOOL_RESULT_FETCH': {
-      const session = registry.get(event.sessionId);
-      if (!session) {
-        sendErr(sink, event.sessionId, 'unknown_session', 'session not found');
-        return;
-      }
+    case 'TOOL_RESULT_FETCH':
       void session.fetchToolResult(event.toolCallId).then((content) => {
         sink.send({
           type: 'TOOL_RESULT_CONTENT',
           seq: 0,
-          sessionId: session.sessionId,
           requestId: event.requestId,
           toolCallId: event.toolCallId,
           content: content ?? '',
         });
       });
       return;
-    }
 
-    case 'ABORT_TURN': {
-      const session = registry.get(event.sessionId);
-      if (!session) {
-        sendErr(sink, event.sessionId, 'unknown_session', 'session not found');
-        return;
-      }
+    case 'ABORT_TURN':
       session.abortTurn('client_abort');
       return;
-    }
 
     default: {
       const _exhaustive: never = event;
@@ -311,11 +203,10 @@ function handleClientEvent(
   }
 }
 
-function sendErr(sink: EventSink, sessionId: string, reason: string, message: string): void {
+function sendErr(sink: EventSink, reason: string, message: string): void {
   const event: ServerEvent = {
     type: 'CLI_ERROR',
     seq: 0,
-    sessionId,
     reason,
     message,
   };

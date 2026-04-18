@@ -49,19 +49,10 @@ describe('tool approval flow (integration)', () => {
     const addr = server.address() as AddressInfo;
     client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await client.connect();
+    await client.waitFor('SNAPSHOT');
 
-    await client.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
-    const created = await client.waitFor('SESSION_CREATED');
-    await client.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await client.waitFor('SESSION_ATTACHED');
+    await client.send({ type: 'START_TURN', prompt: 'refactor' });
 
-    await client.send({
-      type: 'START_TURN',
-      sessionId: created.sessionId,
-      prompt: 'refactor',
-    });
-
-    // Wait for the tool_call MESSAGE to arrive.
     const toolCallMsg = await client.waitForMatch(
       (e) => e.type === 'MESSAGE' && e.message.role === 'tool_call',
       8_000,
@@ -75,19 +66,16 @@ describe('tool approval flow (integration)', () => {
 
     await client.send({
       type: 'TOOL_CALL_RESULT',
-      sessionId: created.sessionId,
       toolCallId: toolCallMsg.message.toolCallId,
       approved: true,
     });
 
-    // Wait for the approval MESSAGE_UPDATE.
     await client.waitForMatch(
       (e) => e.type === 'MESSAGE_UPDATE' && e.update.approval === 'approved',
       5_000,
       'approval update',
     );
 
-    // Wait for tool result to populate on the tool_call row.
     await client.waitForMatch(
       (e) =>
         e.type === 'MESSAGE_UPDATE' &&
@@ -113,17 +101,9 @@ describe('tool approval flow (integration)', () => {
     const addr = server.address() as AddressInfo;
     client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await client.connect();
+    await client.waitFor('SNAPSHOT');
 
-    await client.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
-    const created = await client.waitFor('SESSION_CREATED');
-    await client.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await client.waitFor('SESSION_ATTACHED');
-
-    await client.send({
-      type: 'START_TURN',
-      sessionId: created.sessionId,
-      prompt: 'do',
-    });
+    await client.send({ type: 'START_TURN', prompt: 'do' });
 
     const toolCallMsg = await client.waitForMatch(
       (e) => e.type === 'MESSAGE' && e.message.role === 'tool_call',
@@ -136,7 +116,6 @@ describe('tool approval flow (integration)', () => {
 
     await client.send({
       type: 'TOOL_CALL_RESULT',
-      sessionId: created.sessionId,
       toolCallId: toolCallMsg.message.toolCallId,
       approved: false,
       reason: 'unsafe',

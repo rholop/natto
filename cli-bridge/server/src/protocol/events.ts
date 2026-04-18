@@ -2,7 +2,6 @@ import { z } from 'zod';
 
 export const PROVIDERS = ['claude-code', 'gemini'] as const;
 export type Provider = (typeof PROVIDERS)[number];
-const ProviderSchema = z.enum(PROVIDERS);
 
 export const SESSION_STATES = [
   'Idle',
@@ -72,50 +71,15 @@ export type MessageUpdate = z.infer<typeof MessageUpdateSchema>;
 const MessageEventSchema = z.object({
   type: z.literal('MESSAGE'),
   seq: z.number(),
-  sessionId: z.string(),
   message: MessageSchema,
 });
 const MessageUpdateEventSchema = z.object({
   type: z.literal('MESSAGE_UPDATE'),
   seq: z.number(),
-  sessionId: z.string(),
   update: MessageUpdateSchema,
 });
 export const LogEntrySchema = z.union([MessageEventSchema, MessageUpdateEventSchema]);
 export type LogEntry = z.infer<typeof LogEntrySchema>;
-
-const SessionCreatedSchema = z.object({
-  type: z.literal('SESSION_CREATED'),
-  seq: z.number(),
-  sessionId: z.string(),
-  provider: ProviderSchema,
-  cwd: z.string(),
-});
-
-const SessionInfoSchema = z.object({
-  sessionId: z.string(),
-  provider: ProviderSchema,
-  cwd: z.string(),
-  state: SessionStateSchema,
-  lastSeq: z.number(),
-  createdAt: z.number(),
-  updatedAt: z.number(),
-});
-export type SessionInfo = z.infer<typeof SessionInfoSchema>;
-
-const SessionListSchema = z.object({
-  type: z.literal('SESSION_LIST'),
-  seq: z.number(),
-  sessionId: z.string(),
-  sessions: z.array(SessionInfoSchema),
-});
-
-const SessionAttachedSchema = z.object({
-  type: z.literal('SESSION_ATTACHED'),
-  seq: z.number(),
-  sessionId: z.string(),
-  lastSeq: z.number(),
-});
 
 const PendingToolCallSchema = z.object({
   toolCallId: z.string(),
@@ -124,10 +88,9 @@ const PendingToolCallSchema = z.object({
   args: z.string(),
 });
 
-const SessionSnapshotSchema = z.object({
-  type: z.literal('SESSION_SNAPSHOT'),
+const SnapshotSchema = z.object({
+  type: z.literal('SNAPSHOT'),
   seq: z.number(),
-  sessionId: z.string(),
   state: SessionStateSchema,
   lastSeq: z.number(),
   recent: z.array(LogEntrySchema),
@@ -136,16 +99,9 @@ const SessionSnapshotSchema = z.object({
   hasMore: z.boolean(),
 });
 
-const SessionRemovedSchema = z.object({
-  type: z.literal('SESSION_REMOVED'),
-  seq: z.number(),
-  sessionId: z.string(),
-});
-
 const HistoryPageSchema = z.object({
   type: z.literal('HISTORY_PAGE'),
   seq: z.number(),
-  sessionId: z.string(),
   requestId: z.string(),
   entries: z.array(LogEntrySchema),
   hasMore: z.boolean(),
@@ -154,7 +110,6 @@ const HistoryPageSchema = z.object({
 const ToolResultContentSchema = z.object({
   type: z.literal('TOOL_RESULT_CONTENT'),
   seq: z.number(),
-  sessionId: z.string(),
   requestId: z.string(),
   toolCallId: z.string(),
   content: z.string(),
@@ -163,7 +118,6 @@ const ToolResultContentSchema = z.object({
 const CliErrorSchema = z.object({
   type: z.literal('CLI_ERROR'),
   seq: z.number(),
-  sessionId: z.string(),
   reason: z.string(),
   message: z.string(),
   exitCode: z.number().optional(),
@@ -173,11 +127,7 @@ const CliErrorSchema = z.object({
 export const ServerEventSchema = z.discriminatedUnion('type', [
   MessageEventSchema,
   MessageUpdateEventSchema,
-  SessionCreatedSchema,
-  SessionListSchema,
-  SessionAttachedSchema,
-  SessionSnapshotSchema,
-  SessionRemovedSchema,
+  SnapshotSchema,
   HistoryPageSchema,
   ToolResultContentSchema,
   CliErrorSchema,
@@ -185,66 +135,37 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
 export type ServerEvent = z.infer<typeof ServerEventSchema>;
 export type MessageEvent = z.infer<typeof MessageEventSchema>;
 export type MessageUpdateEvent = z.infer<typeof MessageUpdateEventSchema>;
-export type SessionSnapshotEvent = z.infer<typeof SessionSnapshotSchema>;
-export type SessionListEvent = z.infer<typeof SessionListSchema>;
+export type SnapshotEvent = z.infer<typeof SnapshotSchema>;
 export type HistoryPageEvent = z.infer<typeof HistoryPageSchema>;
 export type ToolResultContentEvent = z.infer<typeof ToolResultContentSchema>;
 export type CliErrorEvent = z.infer<typeof CliErrorSchema>;
 
-const CreateSessionSchema = z.object({
-  type: z.literal('CREATE_SESSION'),
-  provider: ProviderSchema,
-  cwd: z.string(),
-});
-const ListSessionsSchema = z.object({ type: z.literal('LIST_SESSIONS') });
-const AttachSessionSchema = z.object({
-  type: z.literal('ATTACH_SESSION'),
-  sessionId: z.string(),
-});
-const DetachSessionSchema = z.object({
-  type: z.literal('DETACH_SESSION'),
-  sessionId: z.string(),
-});
-const RemoveSessionSchema = z.object({
-  type: z.literal('REMOVE_SESSION'),
-  sessionId: z.string(),
-});
 const StartTurnSchema = z.object({
   type: z.literal('START_TURN'),
-  sessionId: z.string(),
   prompt: z.string(),
 });
 const ToolCallResultSchema = z.object({
   type: z.literal('TOOL_CALL_RESULT'),
-  sessionId: z.string(),
   toolCallId: z.string(),
   approved: z.boolean(),
   reason: z.string().optional(),
 });
 const FetchHistorySchema = z.object({
   type: z.literal('FETCH_HISTORY'),
-  sessionId: z.string(),
   beforeSeq: z.number(),
   limit: z.number().optional(),
   requestId: z.string(),
 });
 const ToolResultFetchSchema = z.object({
   type: z.literal('TOOL_RESULT_FETCH'),
-  sessionId: z.string(),
   toolCallId: z.string(),
   requestId: z.string(),
 });
 const AbortTurnSchema = z.object({
   type: z.literal('ABORT_TURN'),
-  sessionId: z.string(),
 });
 
 export const ClientEventSchema = z.discriminatedUnion('type', [
-  CreateSessionSchema,
-  ListSessionsSchema,
-  AttachSessionSchema,
-  DetachSessionSchema,
-  RemoveSessionSchema,
   StartTurnSchema,
   ToolCallResultSchema,
   FetchHistorySchema,

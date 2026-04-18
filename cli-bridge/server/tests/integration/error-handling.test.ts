@@ -36,16 +36,9 @@ describe('error handling (integration)', () => {
     const addr = server.address() as AddressInfo;
     client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await client.connect();
+    await client.waitFor('SNAPSHOT');
 
-    await client.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
-    const created = await client.waitFor('SESSION_CREATED');
-    await client.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await client.waitFor('SESSION_ATTACHED');
-    await client.send({
-      type: 'START_TURN',
-      sessionId: created.sessionId,
-      prompt: 'anything',
-    });
+    await client.send({ type: 'START_TURN', prompt: 'anything' });
 
     const err = await client.waitForMatch(
       (e) => e.type === 'CLI_ERROR' && e.reason === 'cli_exit_nonzero',
@@ -57,33 +50,7 @@ describe('error handling (integration)', () => {
     expect(err.stderr ?? '').toContain('boom stderr');
   });
 
-  it('START_TURN with unknown sessionId emits unknown_session error', async () => {
-    const scenarioPath = new Scenario()
-      .turn(null)
-      .assistantText('never runs')
-      .endTurn()
-      .exit(0)
-      .writeToFile();
-
-    server = await startServer({
-      port: 0,
-      stateDir,
-      adapterFor: () => new MockCliAdapter({ scenarioPath }),
-    });
-    const addr = server.address() as AddressInfo;
-    client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
-    await client.connect();
-
-    await client.send({ type: 'START_TURN', sessionId: 'no_such', prompt: 'hi' });
-    const err = await client.waitForMatch(
-      (e) => e.type === 'CLI_ERROR' && e.reason === 'unknown_session',
-      3_000,
-      'unknown_session',
-    );
-    expect(err.type).toBe('CLI_ERROR');
-  });
-
-  it('malformed client event is logged and ignored (server stays up)', async () => {
+  it('malformed client event yields CLI_ERROR(invalid_message) but server stays up', async () => {
     const scenarioPath = new Scenario()
       .turn(null)
       .assistantText('ok')
@@ -99,6 +66,7 @@ describe('error handling (integration)', () => {
     const addr = server.address() as AddressInfo;
     client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await client.connect();
+    await client.waitFor('SNAPSHOT');
 
     // @ts-expect-error -- deliberately send a non-conforming message
     await client.send({ type: 'GARBAGE', foo: 'bar' });
@@ -108,9 +76,12 @@ describe('error handling (integration)', () => {
       'invalid_message',
     );
 
-    // Server should still accept a valid subsequent message.
-    await client.send({ type: 'LIST_SESSIONS' });
-    const list = await client.waitFor('SESSION_LIST', 3_000);
-    expect(list.sessions).toEqual([]);
+    // A valid subsequent turn should still run.
+    await client.send({ type: 'START_TURN', prompt: 'hi' });
+    await client.waitForMatch(
+      (e) => e.type === 'MESSAGE_UPDATE' && e.update.status === 'complete',
+      8_000,
+      'turn complete',
+    );
   });
 });

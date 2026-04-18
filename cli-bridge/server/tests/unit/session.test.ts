@@ -24,7 +24,6 @@ function makeSessionOnDisk(
 ): Session {
   const now = Date.now();
   const meta: SessionMeta = {
-    sessionId: 'sess-unit',
     provider: adapter.provider,
     cwd: process.cwd(),
     cliSessionUuid: null,
@@ -34,7 +33,7 @@ function makeSessionOnDisk(
     updatedAt: now,
   };
   writeMeta(stateDir, meta);
-  const log = openSessionLog(stateDir, meta.sessionId);
+  const log = openSessionLog(stateDir);
   const session = new Session({
     meta,
     stateDir,
@@ -92,7 +91,6 @@ describe('Session (unit)', () => {
     const events: ServerEvent[] = [];
     const sink: EventSink = { send: (e) => events.push(e) };
     const s = makeSessionOnDisk(dir, new EmptyArgvAdapter(), sink);
-    // Force state to simulate a busy session
     (s as unknown as { meta: SessionMeta }).meta = {
       ...(s as unknown as { meta: SessionMeta }).meta,
       state: 'Streaming',

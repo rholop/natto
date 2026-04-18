@@ -23,7 +23,7 @@ describe('multi-client fan-out (integration)', () => {
     cleanupStateDir(stateDir);
   });
 
-  it('two attached clients see the same ordered MESSAGE/MESSAGE_UPDATE stream', async () => {
+  it('two connected clients see the same ordered MESSAGE/MESSAGE_UPDATE stream', async () => {
     const scenarioPath = new Scenario()
       .turn(null)
       .assistantText('part1 ')
@@ -44,19 +44,10 @@ describe('multi-client fan-out (integration)', () => {
     clients.push(a, b);
     await a.connect();
     await b.connect();
+    await a.waitFor('SNAPSHOT');
+    await b.waitFor('SNAPSHOT');
 
-    await a.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
-    const created = await a.waitFor('SESSION_CREATED');
-    await a.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await b.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await a.waitFor('SESSION_ATTACHED');
-    await b.waitFor('SESSION_ATTACHED');
-
-    await a.send({
-      type: 'START_TURN',
-      sessionId: created.sessionId,
-      prompt: 'go',
-    });
+    await a.send({ type: 'START_TURN', prompt: 'go' });
 
     const endPredicate = (e: ServerEvent) =>
       e.type === 'MESSAGE_UPDATE' && e.update.status === 'complete';

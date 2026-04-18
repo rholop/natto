@@ -16,7 +16,6 @@ function msgEvent(seq: number, id: string): ServerEvent {
   return {
     type: 'MESSAGE',
     seq,
-    sessionId: 's1',
     message: {
       messageId: id,
       role: 'user',

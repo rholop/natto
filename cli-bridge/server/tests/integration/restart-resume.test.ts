@@ -5,7 +5,7 @@ import { TestWsClient } from '../harness/ws-client.js';
 import { Scenario } from '../harness/scenario.js';
 import { MockCliAdapter } from '../harness/mock-adapter.js';
 import { makeTempStateDir, cleanupStateDir } from '../harness/fs-harness.js';
-import { openSessionLog } from '../../src/session/store.js';
+import { openSessionLog, writeMeta } from '../../src/session/store.js';
 
 describe('restart + resume (integration)', () => {
   let stateDir: string;
@@ -35,11 +35,8 @@ describe('restart + resume (integration)', () => {
     const addr1 = server1.address() as AddressInfo;
     const c1 = new TestWsClient(`ws://127.0.0.1:${addr1.port}`);
     await c1.connect();
-    await c1.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
-    const created = await c1.waitFor('SESSION_CREATED');
-    await c1.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await c1.waitFor('SESSION_ATTACHED');
-    await c1.send({ type: 'START_TURN', sessionId: created.sessionId, prompt: 'hi there' });
+    await c1.waitFor('SNAPSHOT');
+    await c1.send({ type: 'START_TURN', prompt: 'hi there' });
     await c1.waitForMatch(
       (e) => e.type === 'MESSAGE_UPDATE' && e.update.status === 'complete',
       8_000,
@@ -57,11 +54,10 @@ describe('restart + resume (integration)', () => {
       const addr2 = server2.address() as AddressInfo;
       const c2 = new TestWsClient(`ws://127.0.0.1:${addr2.port}`);
       await c2.connect();
-      await c2.send({ type: 'LIST_SESSIONS' });
-      const list = await c2.waitFor('SESSION_LIST', 3_000);
-      expect(list.sessions.map((s) => s.sessionId)).toContain(created.sessionId);
-      const restored = list.sessions.find((s) => s.sessionId === created.sessionId)!;
-      expect(restored.state).toBe('Idle');
+      const snap = await c2.waitFor('SNAPSHOT', 3_000);
+      expect(snap.state).toBe('Idle');
+      expect(snap.lastSeq).toBeGreaterThan(0);
+      expect(server2.holder.get().getMeta().cliSessionUuid).toBe('uuid-first');
       await c2.disconnect();
     } finally {
       await server2.close();
@@ -69,14 +65,11 @@ describe('restart + resume (integration)', () => {
   });
 
   it('dirty log on restart: open assistant message is closed with interrupted', async () => {
-    // Manually seed a session dir with an unfinished assistant MESSAGE.
-    const id = 'sess-dirty-1';
     const now = Date.now();
-    const log = openSessionLog(stateDir, id);
+    const log = openSessionLog(stateDir);
     log.append({
       type: 'MESSAGE',
       seq: 1,
-      sessionId: id,
       message: {
         messageId: 'a1',
         role: 'assistant',
@@ -86,10 +79,7 @@ describe('restart + resume (integration)', () => {
       },
     });
     log.close();
-    // Write a minimal meta.json so the registry picks it up.
-    const { writeMeta } = await import('../../src/session/store.js');
     writeMeta(stateDir, {
-      sessionId: id,
       provider: 'claude-code',
       cwd: '/',
       cliSessionUuid: null,
@@ -108,14 +98,13 @@ describe('restart + resume (integration)', () => {
         }),
     });
     try {
-      // Read the log from disk — last entry should be a synthetic interrupt.
-      const reread = openSessionLog(stateDir, id).readAll();
+      const reread = openSessionLog(stateDir).readAll();
       const last = reread[reread.length - 1]!;
       expect(last.type).toBe('MESSAGE_UPDATE');
       if (last.type === 'MESSAGE_UPDATE') {
         expect(last.update.status).toBe('interrupted');
       }
-      expect(server.registry.get(id)?.getState()).toBe('Idle');
+      expect(server.holder.get().getState()).toBe('Idle');
     } finally {
       await server.close();
     }

@@ -39,13 +39,9 @@ describe('reconnection + resume (integration)', () => {
 
     const c1 = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await c1.connect();
-    await c1.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
-    const created = await c1.waitFor('SESSION_CREATED');
-    await c1.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await c1.waitFor('SESSION_ATTACHED');
-    await c1.send({ type: 'START_TURN', sessionId: created.sessionId, prompt: 'read it' });
+    await c1.waitFor('SNAPSHOT');
+    await c1.send({ type: 'START_TURN', prompt: 'read it' });
 
-    // Wait until the session is AwaitingApproval: the tool_call MESSAGE must have arrived.
     await c1.waitForMatch(
       (e) => e.type === 'MESSAGE' && e.message.role === 'tool_call',
       5_000,
@@ -53,21 +49,14 @@ describe('reconnection + resume (integration)', () => {
     );
     await c1.disconnect();
 
-    // Fresh client attaches — snapshot should show pending tool call.
     const c2 = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await c2.connect();
-    await c2.send({ type: 'LIST_SESSIONS' });
-    const list = await c2.waitFor('SESSION_LIST', 3_000);
-    expect(list.sessions.map((s) => s.sessionId)).toContain(created.sessionId);
-
-    await c2.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    const snapshot = await c2.waitFor('SESSION_SNAPSHOT', 3_000);
+    const snapshot = await c2.waitFor('SNAPSHOT', 3_000);
     expect(snapshot.state).toBe('AwaitingApproval');
     expect(snapshot.pendingToolCall).not.toBeNull();
 
     await c2.send({
       type: 'TOOL_CALL_RESULT',
-      sessionId: created.sessionId,
       toolCallId: snapshot.pendingToolCall!.toolCallId,
       approved: true,
     });
@@ -101,30 +90,24 @@ describe('reconnection + resume (integration)', () => {
 
     const client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await client.connect();
-    await client.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
-    const created = await client.waitFor('SESSION_CREATED');
-    await client.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await client.waitFor('SESSION_ATTACHED');
-    await client.send({ type: 'START_TURN', sessionId: created.sessionId, prompt: 'go' });
+    await client.waitFor('SNAPSHOT');
+    await client.send({ type: 'START_TURN', prompt: 'go' });
     await client.waitForMatch(
       (e) => e.type === 'MESSAGE_UPDATE' && e.update.status === 'complete',
       8_000,
       'complete',
     );
 
-    // Re-attach with a fresh socket to get a snapshot based on history.
     await client.disconnect();
     const c2 = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
     await c2.connect();
-    await c2.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    const snap = await c2.waitFor('SESSION_SNAPSHOT', 3_000);
+    const snap = await c2.waitFor('SNAPSHOT', 3_000);
     expect(snap.hasMore).toBe(true);
     expect(snap.recent.length).toBeLessThanOrEqual(2);
 
     const earliestSeq = snap.recent[0]?.seq ?? snap.lastSeq;
     await c2.send({
       type: 'FETCH_HISTORY',
-      sessionId: created.sessionId,
       beforeSeq: earliestSeq,
       limit: 10,
       requestId: 'r1',
@@ -133,39 +116,5 @@ describe('reconnection + resume (integration)', () => {
     expect(page.requestId).toBe('r1');
     expect(page.entries.length).toBeGreaterThan(0);
     await c2.disconnect();
-  });
-
-  it('orphan sweep leaves AwaitingApproval sessions alone even after ttl elapses', async () => {
-    const scenarioPath = new Scenario()
-      .turn(null)
-      .toolCall('Read', { file: 'a.ts' }, { toolCallId: 'tc-exempt' })
-      .exit(0)
-      .writeToFile();
-
-    server = await startServer({
-      port: 0,
-      stateDir,
-      orphanTtlMs: 10,
-      adapterFor: () => new MockCliAdapter({ scenarioPath }),
-    });
-    const addr = server.address() as AddressInfo;
-    const client = new TestWsClient(`ws://127.0.0.1:${addr.port}`);
-    await client.connect();
-    await client.send({ type: 'CREATE_SESSION', provider: 'claude-code', cwd: process.cwd() });
-    const created = await client.waitFor('SESSION_CREATED');
-    await client.send({ type: 'ATTACH_SESSION', sessionId: created.sessionId });
-    await client.waitFor('SESSION_ATTACHED');
-    await client.send({ type: 'START_TURN', sessionId: created.sessionId, prompt: 'go' });
-    await client.waitForMatch(
-      (e) => e.type === 'MESSAGE' && e.message.role === 'tool_call',
-      5_000,
-      'tool_call',
-    );
-    await client.disconnect();
-
-    // Let TTL fire.
-    await new Promise((r) => setTimeout(r, 50));
-    server.registry.sweepOrphans();
-    expect(server.registry.get(created.sessionId)).toBeDefined();
   });
 });
