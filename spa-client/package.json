@@ -1,0 +1,35 @@
+{
+  "name": "@natto/message-list",
+  "version": "0.1.0",
+  "description": "A <natto-message-list> web component: incremental markdown rendering of natto bridge WebSocket frames.",
+  "type": "module",
+  "main": "./dist/natto-message-list.js",
+  "module": "./dist/natto-message-list.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/natto-message-list.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "preact": "^10.22.0",
+    "streaming-markdown": "^0.2.0"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.8.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

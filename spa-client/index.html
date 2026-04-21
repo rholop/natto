@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>natto-message-list demo</title>
+    <style>
+      body {
+        max-width: 720px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        font-family: system-ui, sans-serif;
+      }
+      button {
+        padding: 0.4rem 0.8rem;
+        margin-right: 0.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>&lt;natto-message-list&gt; demo</h1>
+    <p>Click <strong>Play script</strong> to simulate a stream of MESSAGE / MESSAGE_UPDATE frames.</p>
+    <div>
+      <button id="play">Play script</button>
+      <button id="reset">Reset</button>
+    </div>
+    <hr />
+    <natto-message-list id="list"></natto-message-list>
+
+    <script type="module">
+      import './src/index.ts';
+
+      const getList = () => document.getElementById('list');
+
+      const script = [
+        { type: 'MESSAGE', seq: 1, message: { role: 'user', messageId: 'u1', content: 'Explain binary search in markdown.', at: Date.now(), status: 'complete' } },
+        { type: 'MESSAGE', seq: 2, message: { role: 'assistant', messageId: 'a1', content: '', at: Date.now(), status: 'in_progress' } },
+        { type: 'MESSAGE_UPDATE', seq: 3, update: { messageId: 'a1', contentDelta: '# Binary Search\n\n' } },
+        { type: 'MESSAGE_UPDATE', seq: 4, update: { messageId: 'a1', contentDelta: 'Binary search finds a target in a **sorted** array in ' } },
+        { type: 'MESSAGE_UPDATE', seq: 5, update: { messageId: 'a1', contentDelta: '`O(log n)` time.\n\n' } },
+        { type: 'MESSAGE_UPDATE', seq: 6, update: { messageId: 'a1', contentDelta: '```js\nfunction bsearch(arr, t) {\n  let lo = 0, hi = arr.length - 1;\n' } },
+        { type: 'MESSAGE_UPDATE', seq: 7, update: { messageId: 'a1', contentDelta: '  while (lo <= hi) {\n    const mid = (lo + hi) >> 1;\n' } },
+        { type: 'MESSAGE_UPDATE', seq: 8, update: { messageId: 'a1', contentDelta: '    if (arr[mid] === t) return mid;\n' } },
+        { type: 'MESSAGE_UPDATE', seq: 9, update: { messageId: 'a1', contentDelta: '    arr[mid] < t ? (lo = mid + 1) : (hi = mid - 1);\n  }\n  return -1;\n}\n```\n' } },
+        { type: 'MESSAGE_UPDATE', seq: 10, update: { messageId: 'a1', status: 'complete' } },
+        { type: 'MESSAGE', seq: 11, message: { role: 'tool_call', messageId: 't1', toolCallId: 'tc1', name: 'Read', args: '{"file_path":"src/auth.ts"}', approval: 'pending', result: null, at: Date.now(), status: 'in_progress' } },
+        { type: 'MESSAGE_UPDATE', seq: 12, update: { messageId: 't1', approval: 'approved' } },
+        { type: 'MESSAGE_UPDATE', seq: 13, update: { messageId: 't1', status: 'complete', result: { preview: 'export function login() { /* ... */ }', totalBytes: 2048, truncated: true } } },
+      ];
+
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      document.getElementById('play').addEventListener('click', async () => {
+        for (const event of script) {
+          getList().applyServerEvent(event);
+          await sleep(150);
+        }
+      });
+
+      document.getElementById('reset').addEventListener('click', () => {
+        const fresh = document.createElement('natto-message-list');
+        fresh.id = 'list';
+        getList().replaceWith(fresh);
+      });
+    </script>
+  </body>
+</html>
